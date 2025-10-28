@@ -1,16 +1,22 @@
-import asyncio
 import os
+import logging
 import yfinance as yf
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
+)
 from db import SessionLocal, User, Alert
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-scheduler = AsyncIOScheduler()
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(message)s",
+    level=logging.INFO
+)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"Request received: /start from tg_id={update.effective_user.id}")
     session = SessionLocal()
     tg_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
@@ -22,7 +28,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.close()
     await update.message.reply_text("Welcome! Use /setalert <symbol> <price> to set an alert.")
 
+
 async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"Request received: /setalert from tg_id={update.effective_user.id} with args={context.args}")
     if len(context.args) != 2:
         await update.message.reply_text("Usage: /setalert <symbol> <price>")
         return
@@ -32,6 +40,7 @@ async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid price.")
         return
+
     session = SessionLocal()
     tg_id = update.effective_user.id
     user = session.query(User).filter_by(telegram_id=tg_id).first()
@@ -39,9 +48,12 @@ async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.add(alert)
     session.commit()
     session.close()
+    logging.info(f"Alert stored: tg_id={tg_id} symbol={symbol} target={price}")
     await update.message.reply_text(f"Alert set for {symbol} at ₹{price}")
 
+
 async def list_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"Request received: /listalerts from tg_id={update.effective_user.id}")
     session = SessionLocal()
     tg_id = update.effective_user.id
     user = session.query(User).filter_by(telegram_id=tg_id).first()
@@ -52,7 +64,9 @@ async def list_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Your alerts:\n{text}")
     session.close()
 
+
 async def remove_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"Request received: /removealert from tg_id={update.effective_user.id} with args={context.args}")
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /removealert <symbol>")
         return
@@ -64,11 +78,14 @@ async def remove_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.commit()
     session.close()
     if deleted:
+        logging.info(f"Alert removed: tg_id={tg_id} symbol={symbol}")
         await update.message.reply_text(f"Removed alert for {symbol}")
     else:
         await update.message.reply_text(f"No alert found for {symbol}")
 
-async def check_alerts(app):
+
+async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE):
+    logging.info("Job triggered: Checking alerts")
     session = SessionLocal()
     alerts = session.query(Alert).all()
     for alert in alerts:
@@ -80,29 +97,18 @@ async def check_alerts(app):
             current_price = hist["Close"].iloc[-1]
             if current_price >= alert.target_price:
                 user = session.query(User).filter_by(id=alert.user_id).first()
-                await app.bot.send_message(
+                await context.bot.send_message(
                     chat_id=user.telegram_id,
                     text=f"{alert.stock_symbol} hit ₹{current_price:.2f} (target: ₹{alert.target_price})"
                 )
+                logging.info(f"Alert triggered: tg_id={user.telegram_id} symbol={alert.stock_symbol} target={alert.target_price} price={current_price}")
                 session.delete(alert)
                 session.commit()
-        except Exception:
+        except Exception as e:
+            logging.error(f"Error when checking alert for {alert.stock_symbol}: {e}")
             continue
     session.close()
 
-async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setalert", set_alert))
-    app.add_handler(CommandHandler("listalerts", list_alerts))
-    app.add_handler(CommandHandler("removealert", remove_alert))
-
-    scheduler.add_job(lambda: asyncio.create_task(check_alerts(app)), "interval", seconds=60)
-    scheduler.start()
-
-    print("✅ Bot started and checking prices every 60 seconds...")
-    await app.run_polling()
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -112,9 +118,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("listalerts", list_alerts))
     app.add_handler(CommandHandler("removealert", remove_alert))
 
-    scheduler.add_job(lambda: asyncio.create_task(check_alerts(app)), "interval", seconds=60)
-    scheduler.start()
+    job_queue = app.job_queue
+    job_queue.run_repeating(check_alerts_job, interval=60, first=10)
 
     print("✅ Bot started and checking prices every 60 seconds...")
     app.run_polling()
-
