@@ -1,13 +1,14 @@
 import asyncio
+import os
+import yfinance as yf
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import SessionLocal, User, Alert
-import yfinance as yf
-import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-scheduler = BackgroundScheduler()
+
+scheduler = AsyncIOScheduler()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = SessionLocal()
@@ -71,27 +72,37 @@ async def check_alerts(app):
     session = SessionLocal()
     alerts = session.query(Alert).all()
     for alert in alerts:
-        ticker = yf.Ticker(alert.stock_symbol + ".NS")
         try:
-            current_price = ticker.history(period="1d")["Close"].iloc[-1]
+            ticker = yf.Ticker(alert.stock_symbol + ".NS")
+            hist = ticker.history(period="1d")
+            if hist.empty:
+                continue
+            current_price = hist["Close"].iloc[-1]
+            if current_price >= alert.target_price:
+                user = session.query(User).filter_by(id=alert.user_id).first()
+                await app.bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=f"{alert.stock_symbol} hit ₹{current_price:.2f} (target: ₹{alert.target_price})"
+                )
+                session.delete(alert)
+                session.commit()
         except Exception:
             continue
-        if current_price >= alert.target_price:
-            user = session.query(User).filter_by(id=alert.user_id).first()
-            await app.bot.send_message(chat_id=user.telegram_id, text=f"{alert.stock_symbol} hit ₹{current_price:.2f} (target: ₹{alert.target_price})")
-            session.delete(alert)
-            session.commit()
     session.close()
 
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setalert", set_alert))
     app.add_handler(CommandHandler("listalerts", list_alerts))
     app.add_handler(CommandHandler("removealert", remove_alert))
-    scheduler.add_job(lambda: asyncio.run(check_alerts(app)), "interval", minutes=1)
+
+    scheduler.add_job(lambda: asyncio.create_task(check_alerts(app)), "interval", seconds=60)
     scheduler.start()
+
+    print("✅ Bot started and checking prices every 60 seconds...")
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())
