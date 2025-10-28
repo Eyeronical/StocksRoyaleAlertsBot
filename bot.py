@@ -105,4 +105,16 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setalert", set_alert))
+    app.add_handler(CommandHandler("listalerts", list_alerts))
+    app.add_handler(CommandHandler("removealert", remove_alert))
+
+    scheduler.add_job(lambda: asyncio.create_task(check_alerts(app)), "interval", seconds=60)
+    scheduler.start()
+
+    print("✅ Bot started and checking prices every 60 seconds...")
+    app.run_polling()
+
