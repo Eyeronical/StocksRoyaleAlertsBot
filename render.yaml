@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: telegram-stock-alert-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "./start.sh"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
